@@ -1,0 +1,23 @@
+#ifndef UI_INSTRUCTIONS_H
+#define UI_INSTRUCTIONS_H
+
+#define PLACE_TOP 1
+#define PLACE_TOP_LEFT 2
+#define PLACE_TOP_RIGHT 3
+#define PLACE_LEFT 4
+#define PLACE_RIGHT 5
+#define PLACE_BOTTOM 6
+#define PLACE_BOTTOM_LEFT 7
+#define PLACE_BOTTOM_RIGHT 8
+
+#define MOVE_UP 9
+#define MOVE_DOWN 10
+#define MOVE_LEFT 11
+#define MOVE_RIGHT 12
+
+#define EXPAND_UP 13
+#define EXPAND_DOWN 14
+#define EXPAND_LEFT 15
+#define EXPAND_RIGHT 16
+
+#endif
