@@ -1,3 +1,12 @@
+/*****************************************************************************
+ * TODO
+ *
+ * - Ensure memcpy compile time checks are never actually executed
+ * - _svalid doesn't really need to return an int?
+ * - _svalid should ensure passed in pointer is within allocated blocks
+ * - Can temporaries be supported?
+ *****************************************************************************/
+
 #include "stent.h"
 
 #include <stdio.h>
@@ -6,32 +15,63 @@
 
 #ifdef STENT_ENABLE
 
-/***************************************************
- * Reference
- ***************************************************/
-
-struct _StentAllocation
+/*****************************************************************************
+ * Allocation
+ *
+ * Structure containing information about individual allocations. The ptr
+ * must be the first element to allow the additional indirection of the
+ * type-safe reference to work. The memory pointed to by ptr may get freed
+ * but the Allocation structure itself persists throughout the lifespan of the
+ * program.
+ *****************************************************************************/
+struct Allocation
 {
-  void *ptr;
-  int expired;
-  const char *type;
+  void *ptr;        /* Pointer to the native C memory block */
+  int expired;      /* Track whether allocation has been freed */
+  const char *type; /* The specified type for run-time type identification */
 };
 
-struct _StentBlock
+/*****************************************************************************
+ * Block
+ *
+ * Rather than allocate lots of small Allocation structures, allocations of
+ * much larger blocks are done to reduce fragmentation. Each one of these
+ * blocks tracks the count and then the next block in the list once it has
+ * been filled.
+ *****************************************************************************/
+struct Block
 {
-  struct _StentAllocation allocations[STENT_BLOCKSIZE];
-  size_t count;
-  struct _StentBlock *next;
+  struct Allocation
+    allocations[STENT_BLOCKSIZE]; /* Individual allocations */
+
+  size_t count;                   /* The number of reserved allocations */
+  struct Block *next;             /* The next block once this is exhausted */
 };
 
-static struct _StentBlock *_sblocks;
+/*****************************************************************************
+ * blocks
+ *
+ * The head of the blocks list. This is assigned an initial block during the
+ * _stent_init function. If an existing head exists, it is attached to the new
+ * block causing the most recent allocations to be the fastest to find (though
+ * searching in this way is typically never needed).
+ *****************************************************************************/
+static struct Block *blocks;
 
-static void _satexit()
+/*****************************************************************************
+ * _stent_atexit
+ *
+ * This function is called when the program terminates. It iterates through
+ * all the blocks in the list and then iterates through each of the individual
+ * allocations. If any of these have not been freed before program exit it
+ * reports a leak.
+ *****************************************************************************/
+static void _stent_atexit()
 {
-  struct _StentBlock *sb = NULL;
+  struct Block *sb = NULL;
   size_t ai = 0;
 
-  sb = _sblocks;
+  sb = blocks;
 
   while(sb)
   {
@@ -49,13 +89,20 @@ static void _satexit()
   }
 }
 
-static void _sinit()
+/*****************************************************************************
+ * _stent_init
+ *
+ * This function is called by every function relating to memory to ensure
+ * that the initial block is not NULL. It simply allocates a new Block
+ * structure and reports that this tool is active in the program.
+ *****************************************************************************/
+static void _stent_init()
 {
-  if(!_sblocks)
+  if(!blocks)
   {
-    _sblocks = (struct _StentBlock *)calloc(1, sizeof(*_sblocks));
+    blocks = (struct Block *)calloc(1, sizeof(*blocks));
 
-    if(!_sblocks)
+    if(!blocks)
     {
       fprintf(stderr, "Error: Failed to initialize initial block\n");
 
@@ -63,81 +110,100 @@ static void _sinit()
     }
 
     fprintf(stderr, "Warning: Debug memory allocator enabled\n");
-    atexit(_satexit);
+    atexit(_stent_atexit);
   }
 }
 
-refvoid _salloc(size_t size, const char *type, void *placement)
+/*****************************************************************************
+ * _stent_alloc
+ *
+ * Ensure the tool has been initialized and early return if a size of zero
+ * has been specified. Assign the return value with the memory location of
+ * the next free allocation. Allocate the native block of memory, if this
+ * succeeds, increment the current block's allocation count (allocating a new
+ * block if necessary) because this allocation is now reserved. Set additional
+ * properties on the allocation such as type and return the value casted to
+ * refvoid.
+ *****************************************************************************/
+refvoid _stent_alloc(size_t size, const char *type)
 {
-  refvoid rtn = NULL;
-  struct _StentBlock *sb = NULL;
+  struct Allocation *rtn = NULL;
+  struct Block *sb = NULL;
 
-  _sinit();
+  _stent_init();
 
-  if(!size && !placement)
+  if(!size)
   {
+    fprintf(stderr, "Warning: Allocation of zero size\n");
+
     return NULL;
   }
 
-  rtn = (refvoid)&_sblocks->allocations[_sblocks->count];
+  rtn = &blocks->allocations[blocks->count];
+  rtn->ptr = calloc(1, size);
 
-  if(size)
+  if(!rtn->ptr)
   {
-    rtn[0] = calloc(1, size);
-
-    if(!rtn[0])
-    {
-      fprintf(stderr, "Error: Failed to allocate %s\n", type);
-      abort();
-    }
-  }
-  else
-  {
-    if(!placement)
-    {
-      fprintf(stderr, "Error: No size specified and no placement data %s\n",
-        type);
-
-      abort();
-    }
-
-    rtn[0] = placement;
+    fprintf(stderr, "Error: Failed to allocate %s\n", type);
+    abort();
   }
 
-  _sblocks->allocations[_sblocks->count].type = type;
-  _sblocks->count++;
+  blocks->count++;
 
-  if(_sblocks->count >= STENT_BLOCKSIZE)
+  if(blocks->count >= STENT_BLOCKSIZE)
   {
     fprintf(stderr, "Warning: Adding allocation blocks\n");
-    sb = (struct _StentBlock *)calloc(1, sizeof(*_sblocks));
-    sb->next = _sblocks;
-    _sblocks = sb;
+    sb = (struct Block *)calloc(1, sizeof(*blocks));
+    sb->next = blocks;
+    blocks = sb;
   }
 
-  return rtn;
+  rtn->type = type;
+
+  return (refvoid)rtn;
 }
 
+/*****************************************************************************
+ * _sfree
+ *
+ * Ensure the tool has been initialized and that the specified allocation
+ * referenced by ptr is still valid. Cast this to an Allocation structure
+ * and free the native memory assigned to it. Finally set the expired flag so
+ * that it is no longer seen as valid.
+ *****************************************************************************/
 void _sfree(refvoid ptr, const char *file, size_t line)
 {
-  struct _StentAllocation *allocation = NULL;
+  struct Allocation *allocation = NULL;
 
-  _sinit();
+  _stent_init();
   _svalid(ptr, file, line);
 
-  allocation = (struct _StentAllocation *)ptr;
+  allocation = (struct Allocation *)ptr;
   free(allocation->ptr);
   allocation->expired = 1;
 }
 
+/*****************************************************************************
+ * _scast
+ *
+ * Ensure the tool has been initialized and that the specified allocation
+ * referenced by ptr is still valid. Obtain the allocation and ensure that the
+ * type string matches the one specified. If it matches then the cast is
+ * assumed to be safe.
+ *****************************************************************************/
 refvoid _scast(const char *type, refvoid ptr, const char *file, size_t line)
 {
-  struct _StentAllocation *allocation = NULL;
+  struct Allocation *allocation = NULL;
 
-  _sinit();
+  _stent_init();
   _svalid(ptr, file, line);
 
-  allocation = (struct _StentAllocation *)ptr;
+  allocation = (struct Allocation *)ptr;
+
+  if(strcmp(allocation->type, "void") == 0)
+  {
+    return ptr;
+  }
 
   if(strcmp(allocation->type, type) != 0)
   {
@@ -149,18 +215,26 @@ refvoid _scast(const char *type, refvoid ptr, const char *file, size_t line)
   return ptr;
 }
 
+/*****************************************************************************
+ * _svalid
+ *
+ * Ensure the tool has been initialized, check that the specified pointer
+ * is not NULL and check if the obtained allocation has the expired flag set.
+ * If the flag has not been set, assume the data is valid and return 1.
+ *****************************************************************************/
 int _svalid(refvoid ptr, const char *file, size_t line)
 {
-  struct _StentAllocation *allocation = NULL;
+  struct Allocation *allocation = NULL;
 
-  _sinit();
-  allocation = (struct _StentAllocation *)ptr;
+  _stent_init();
 
   if(!ptr)
   {
     fprintf(stderr, "Error: NULL pointer in %s %i\n",
       file, (int)line);
   }
+
+  allocation = (struct Allocation *)ptr;
 
   if(allocation->expired)
   {
@@ -196,8 +270,7 @@ vector(void) _vector_new(size_t size)
   ref(_StentVector) rtn = NULL;
 
 #ifdef STENT_ENABLE
-  rtn = (ref(_StentVector))_salloc(sizeof(struct _StentVector),
-    type, NULL);
+  rtn = (ref(_StentVector))_stent_alloc(sizeof(struct _StentVector), type);
 #else
   rtn = salloc(_StentVector);
 #endif

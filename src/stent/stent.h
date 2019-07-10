@@ -4,9 +4,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-/*
-#define STENT_ENABLE
-*/
+/*****************************************************************************
+ * STENT_ENABLE
+ *
+ * Compile time flag to enable the tool. If disabled then dummy operations are
+ * used instead. Facilities such as vector(T) are always available.
+ *****************************************************************************/
 #define STENT_ENABLE
 
 #define STENT_BLOCKSIZE 1024
@@ -14,47 +17,88 @@
 
 #ifdef STENT_ENABLE
 
-/***************************************************
- * Reference
- ***************************************************/
-
+/*****************************************************************************
+ * refvoid
+ *
+ * MACRO to describe a void reference. This is mostly a convenience type as
+ * it is used to pass into the generic utility functions for the tool. It is
+ * similar to the ref(T) MACRO but avoids the struct requirement.
+ *****************************************************************************/
 #define refvoid \
   void **
 
+/*****************************************************************************
+ * ref(T)
+ *
+ * MACRO to describe a pointer tracked by the tool. When enabled this type has
+ * an extra indirection because it is stored within a structure which can be
+ * subsequently checked for a deletion flag prior to use. To access the raw
+ * pointer it needs an additional dereference (via the _(P) MACRO) in order
+ * check or validity and then to obtain the final pointer location (first
+ * element of the referenced structure). This is the key component of this
+ * tool.
+ *****************************************************************************/
 #define ref(T) \
   struct T **
 
+/*****************************************************************************
+ * salloc(T)
+ *
+ * MACRO to obtain the size and name string of specified type. This is passed
+ * into the utility function which does the actual allocation. The data is
+ * then explicitly casted to the specified type to ensure that the entire
+ * operation is type safe.
+ *****************************************************************************/
 #define salloc(T) \
-  (ref(T))_salloc(sizeof(struct T), #T, NULL)
+  (ref(T))_stent_alloc(sizeof(struct T), #T)
 
-#define salloc_placement(T, F) \
-  (1 || (((ref(T))NULL)[0] = F) ? (ref(T))_salloc(0, #T, F) : NULL)
-
+/*****************************************************************************
+ * sfree(P)
+ *
+ * MACRO to ensure that specified pointer is in the correct format for the
+ * tool and that it is not a temporary. The specified reference is then casted
+ * and passed into the implementation along with file name of the unit and the
+ * line number for debug purposes.
+ *****************************************************************************/
 #define sfree(R) \
   do \
   { \
-    memcmp(&R, &R, 0); \
-    memcmp(R[0], R[0], 0); \
+    if(0) \
+    { \
+      memcmp(&R, &R, 0); \
+      memcmp(R[0], R[0], 0); \
+    } \
     _sfree((refvoid)R, __FILE__, __LINE__); \
   } \
   while(0)
 
+/*****************************************************************************
+ * scast
+ *
+ * MACRO to pass the type string and reference to check into the
+ * implementation. Also pass through the unit file name and line number for
+ * debug purposes. The returned refvoid is casted to the requested type if
+ * the implementation did not cause an incorrect type error.
+ *****************************************************************************/
 #define scast(T, R) \
   (ref(T))_scast(#T, (refvoid)R, __FILE__, __LINE__)
 
+/*****************************************************************************
+ * _(P)
+ *
+ * MACRO to pass the reference into the implementation along with the unit
+ * file name and line number for debug purposes. The memcmp calls ensure that
+ * the specified reference is of the correct format for the tool. The returned
+ * value is the first element of the passed in parameter to ensure type safety
+ * and avoiding the need to manually cast.
+ *****************************************************************************/
 #define _(R) \
   (_svalid((refvoid)R, __FILE__, __LINE__) || \
     memcmp(&R, &R, 0) || \
     memcmp(R[0], R[0], 0) ? \
     R[0] : NULL)
 
-#define __(R) \
-  (*_(R))
-
-#define reset(R) \
-  memset(_(R), 0, sizeof(*_(R)));
-
-refvoid _salloc(size_t size, const char *type, void *placement);
+refvoid _stent_alloc(size_t size, const char *type);
 void _sfree(refvoid ptr, const char *file, size_t line);
 refvoid _scast(const char *type, refvoid ptr, const char *file, size_t line);
 int _svalid(refvoid ptr, const char *file, size_t line);
@@ -159,9 +203,6 @@ void _vector_insert(vector(void) ptr, size_t before,
 
 #define salloc(T) \
   (ref(T))calloc(1, sizeof(struct T))
-
-#define salloc_placement(T, F) \
-  F
 
 #define sfree(R) \
   free(R)
